@@ -2,4 +2,5 @@
 
 mod link;
 mod names;
+mod scan;
 mod walk;
