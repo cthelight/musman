@@ -1,0 +1,20 @@
+[package]
+name = "musman"
+version = "0.1.0"
+edition = "2024"
+description = "Fast hard-link manager for multi-format music libraries"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+rayon = "1.8"
+
+[dev-dependencies]
+rand = "0.9"
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
