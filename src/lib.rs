@@ -226,8 +226,5 @@ pub fn run(cfg: &Config) -> Result<Stats> {
     stats.files_removed += track_removed.len();
     stats.dirs_removed += track_dirs;
 
-    // 6. Keep the max_qual folder non-empty for syncthing.
-    clean::ensure_stfolder(&cfg.max_qual_root, cfg.dry_run, cfg.verbose)?;
-
     Ok(stats)
 }

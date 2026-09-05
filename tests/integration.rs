@@ -307,15 +307,11 @@ fn fresh_run_creates_full_layout() {
     assert_tree_matches(&formats, &expected_formats);
     assert_tree_matches(&max_qual, &expected_tracks);
     assert_dirs_match(&formats, &expected_formats);
-    assert_eq!(
-        list_dirs(&max_qual),
-        expected_dirs(&expected_tracks)
-            .into_iter()
-            .chain(std::iter::once(".stfolder".to_string()))
-            .collect()
+    assert_dirs_match(&max_qual, &expected_tracks);
+    assert!(
+        !max_qual.join(".stfolder").exists(),
+        "musman must not create a .stfolder"
     );
-
-    assert!(max_qual.join(".stfolder").is_dir());
     let expected_rels: Vec<&str> = expected_formats.keys().map(|s| s.as_str()).collect();
     assert!(expected_rels.contains(&"flac/Artist/Album A/01 Intro.flac"));
     assert!(expected_rels.contains(&"flac/.hidden/secret.flac"));
@@ -338,7 +334,6 @@ fn second_run_is_idempotent() {
 
     run_musman(&src, &formats, &max_qual, &[]);
     let before = snapshot(&formats);
-    let stfolder_before = fs::metadata(max_qual.join(".stfolder")).unwrap();
 
     let (out, _) = run_musman(&src, &formats, &max_qual, &[]);
     assert!(out.contains("0 created"), "expected no creations: {out}");
@@ -349,13 +344,6 @@ fn second_run_is_idempotent() {
     assert!(!out.contains("removed"), "expected no removals: {out}");
 
     assert_eq!(before, snapshot(&formats), "formats tree changed on re-run");
-    let stfolder_after = fs::metadata(max_qual.join(".stfolder")).unwrap();
-    use std::os::unix::fs::MetadataExt;
-    assert_eq!(
-        stfolder_before.ino(),
-        stfolder_after.ino(),
-        ".stfolder was recreated on re-run"
-    );
 }
 
 #[test]
@@ -510,7 +498,6 @@ fn deleting_source_files_removes_their_links_and_directories() {
         !max_qual.join("Artist/Album").exists(),
         "the empty album directory must be pruned"
     );
-    assert!(max_qual.join(".stfolder").is_dir());
 }
 
 // ---------------------------------------------------------------------
@@ -545,13 +532,7 @@ fn sparse_tree_with_single_song_albums() {
     assert_tree_matches(&formats, &expected_formats);
     assert_tree_matches(&max_qual, &expected_tracks);
     assert_dirs_match(&formats, &expected_formats);
-    assert_eq!(
-        list_dirs(&max_qual),
-        expected_dirs(&expected_tracks)
-            .into_iter()
-            .chain(std::iter::once(".stfolder".to_string()))
-            .collect()
-    );
+    assert_dirs_match(&max_qual, &expected_tracks);
 
     let (out, _) = run_musman(&src, &formats, &max_qual, &[]);
     assert!(out.contains("0 created"), "re-run must be a no-op: {out}");
@@ -753,11 +734,11 @@ fn duplicate_format_flags_are_deduped() {
 }
 
 // ---------------------------------------------------------------------
-// syncthing marker and dry run
+// syncthing markers and dry run
 // ---------------------------------------------------------------------
 
 #[test]
-fn stfolder_created_once_and_never_touched() {
+fn stfolder_is_never_created_and_never_touched() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src");
     write_file(&src.join("Artist/Album/01 Song.flac"), "flac");
@@ -765,9 +746,16 @@ fn stfolder_created_once_and_never_touched() {
     let formats = tmp.path().join("formats");
     let max_qual = tmp.path().join("max_qual");
 
+    // A fresh run must not create a .stfolder.
     run_musman(&src, &formats, &max_qual, &[]);
+    assert!(
+        !max_qual.join(".stfolder").exists(),
+        "musman must not create a .stfolder"
+    );
+
+    // A .stfolder that syncthing created itself is left untouched.
     let marker = max_qual.join(".stfolder");
-    assert!(marker.is_dir());
+    fs::create_dir_all(&marker).unwrap();
     fs::write(marker.join("conflict.txt"), "syncthing data").unwrap();
     let marker_meta_before = fs::metadata(&marker).unwrap();
 

@@ -83,9 +83,9 @@ refused layout.
   ignored, and the *last* dot wins (`1. Title.flac` is a `flac`).
 - Refused layouts (exit 2): source equal to or inside an output root,
   identical or nested output roots.
-- The `max_qual` tree keeps a `.stfolder` directory so syncthing does
-  not drop the folder when it becomes empty. It is created once and
-  never touched again (not walked, not removed, mtime preserved).
+- Directories named `.stfolder` (syncthing markers) are ignored
+  entirely, whether or not they exist: never created, never removed,
+  never touched (not walked, mtime preserved).
 
 ### Dry run
 
@@ -129,7 +129,7 @@ cargo test
   (`artist/album/song.ext`, albums of 1–15 songs) and assert exact file
   sets, directory structure, hard-link inode identity, exit codes and
   side effects: idempotency, mutation reconciliation, sparse/dense
-  layouts, odd filenames, unsafe-layout refusals, `.stfolder`
-  persistence, dry-run, a seeded randomized property test against an
+   layouts, odd filenames, unsafe-layout refusals, `.stfolder` being
+   left alone, dry-run, a seeded randomized property test against an
   independent expected-state builder, a differential test against
   `legacy/create_music_links.sh`, and a 15,000-song performance smoke.

@@ -184,31 +184,6 @@ fn scan_dir(dir: &Path, keep: &HashSet<PathBuf>) -> Result<DirScan> {
     Ok(scan)
 }
 
-/// Ensure the syncthing marker directory exists under `max_qual_root`.
-///
-/// Syncthing drops a folder that becomes completely empty; keeping a
-/// marker directory guarantees the folder is always considered
-/// non-empty. When the marker already exists it is left completely
-/// untouched (no recreation, no mtime churn).
-pub fn ensure_stfolder(max_qual_root: &Path, dry_run: bool, verbose: bool) -> Result<()> {
-    let marker = max_qual_root.join(".stfolder");
-    if marker.is_dir() {
-        return Ok(());
-    }
-    if verbose {
-        println!(
-            "{}  {}",
-            if dry_run { "would create" } else { "create" },
-            marker.display()
-        );
-    }
-    if !dry_run {
-        fs::create_dir_all(&marker)
-            .with_context(|| format!("create syncthing marker {}", marker.display()))?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
