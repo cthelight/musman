@@ -85,7 +85,11 @@ pub fn ensure_hard_link(
         }
         Some(_) => {
             if verbose {
-                println!("replace {}", dest.display());
+                println!(
+                    "{} {}",
+                    if dry_run { "would replace" } else { "replace" },
+                    dest.display()
+                );
             }
             if !dry_run {
                 fs::remove_file(dest)
@@ -96,7 +100,11 @@ pub fn ensure_hard_link(
         }
         None => {
             if verbose {
-                println!("create  {}", dest.display());
+                println!(
+                    "{} {}",
+                    if dry_run { "would create" } else { "create" },
+                    dest.display()
+                );
             }
             if !dry_run {
                 do_link(src, dest)?;
@@ -107,20 +115,24 @@ pub fn ensure_hard_link(
 }
 
 /// `link(2)`, creating `dest`'s parent directories if they do not exist
-/// yet (first run). Distinguishes a missing parent from a vanished
-/// source so the error stays meaningful.
+/// yet (first run).
+///
+/// A `NotFound` error means either the source vanished or some component
+/// of `dest`'s parent chain is missing. Other link workers may be
+/// creating the same parent concurrently, so `create_dir_all` (a no-op
+/// when the chain already exists, tolerant of `EEXIST`) is called
+/// unconditionally and the link is always retried: if the parent now
+/// exists the retry succeeds, otherwise the error is the source having
+/// vanished, which stays meaningful.
 fn do_link(src: &Path, dest: &Path) -> Result<()> {
     match fs::hard_link(src, dest) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty())
-                && !parent.exists()
-            {
+            if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("create directory {}", parent.display()))?;
-                return fs::hard_link(src, dest).with_context(|| link_context(src, dest));
             }
-            Err(err).with_context(|| link_context(src, dest))
+            fs::hard_link(src, dest).with_context(|| link_context(src, dest))
         }
         Err(err) => Err(err).with_context(|| link_context(src, dest)),
     }
