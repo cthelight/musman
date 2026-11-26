@@ -12,6 +12,11 @@ musman offers two operations over a source music library:
   hard links are impossible (FAT32/exFAT USB sticks, network targets,
   a phone's storage, …).
 
+Repeated settings can be stored in hidden `.musman.toml` files: a
+successful `link` saves its link settings at `<source>/.musman.toml`,
+and a successful `sync` saves its view settings at
+`<target>/.musman.toml`, so later runs can often be bare reruns.
+
 ## link: derived hard-link trees
 
 `link` keeps two *derived* trees in sync with a source music library by
@@ -35,12 +40,15 @@ source/Artist B/Album/02 Song.mp3
         +-- max_qual/Artist B/Album/02 Song.mp3      (no flac available)
 ```
 
-The source tree is **never modified**. The two output trees are pure
-derived artifacts: on every run musman computes the desired end state
-from a single pass over the source, creates missing links, re-points
-stale ones, and removes everything else (including subdirectories of
-formats that are no longer managed), pruning the directories left empty.
-After a run the output trees match the source tree exactly.
+The source **music files** are never modified. The only file `link` may
+create or update inside the source directory is the hidden config
+`<source>/.musman.toml`, unless `--no-config` is used. The two output
+trees are pure derived artifacts: on every run musman computes the
+desired end state from a single pass over the source, creates missing
+links, re-points stale ones, and removes everything else (including
+subdirectories of formats that are no longer managed), pruning the
+directories left empty. After a run the output trees match the source
+tree exactly.
 
 musman replaces `legacy/create_music_links.sh`, which had the same
 semantics but ran one `find` plus one `bash`/`ln -f` process per format
@@ -62,6 +70,10 @@ Selection is *exactly one* of:
 - `--best` — copy the best-quality file of each track (the highest
   `--format` that exists for that track), named `<track>.<ext>`.
 
+The selection may also come from the target's sync config
+(`selection = "best"` or `selection = "only:<ext>"`); a CLI selection
+always wins for the current run and may update the saved config.
+
 ### Change detection
 
 `sync` decides whether a destination file is up to date from **size and
@@ -78,7 +90,65 @@ re-runs cheap on slow mounts:
 - By default `sync` **mirrors** the target: it adds missing files,
   updates changed ones, and removes files that are no longer selected,
   pruning the directories that become empty. `--no-delete` keeps files
-  that are no longer selected (add/update only).
+  that are no longer selected (add/update only). Bare `--no-delete`
+  means `--no-delete=true`; pass `--no-delete=false` to override a saved
+  `no_delete = true`. The saved `no_delete` value is used when the flag
+  is absent.
+
+When `sync` is given any link setting (`-f`, `-i` or `-m`), it first
+runs the equivalent `link` operation and then syncs the result. This is
+announced with a `Continue? [y/N]` prompt before anything changes;
+`--yes` accepts it, and `n` aborts with exit code `2` and no changes.
+`--dry-run` reports `would link and sync` without prompting.
+
+## Configuration
+
+Two hidden, human-editable TOML files are used:
+
+- `<source>/.musman.toml` — the link config, describing the library:
+
+  ```toml
+  formats = ["flac", "mp3", "ogg"] # first = highest quality
+  formats_root = "formats"         # relative to <source>
+  max_qual_root = "max_qual"       # relative to <source>
+  ```
+
+- `<target>/.musman.toml` — the sync config, describing one target view:
+
+  ```toml
+  selection = "best" # or "only:flac"
+  no_delete = false
+  ```
+
+Link config roots are stored relative to the source, using `..` when
+necessary, so the same source config keeps working if the library is
+mounted at another path. The sync config is kept in the target keep-set
+during mirroring and is not removed by `sync`.
+
+Resolution order:
+
+- link settings: CLI → `<source>/.musman.toml` → subcommand defaults
+  (`link` defaults to CWD-relative `formats`/`max_qual`; `sync` defaults
+  to `<source>/formats` and `<source>/max_qual`);
+- sync selection: CLI `--only`/`--best` → `<target>/.musman.toml` →
+  error if absent;
+- `no_delete`: CLI `--no-delete[=BOOL]` → `<target>/.musman.toml` →
+  `false`.
+
+CLI values always drive the current run. A missing config is written
+automatically after a successful run. If an existing config conflicts
+with the CLI, musman prompts before overwriting it; the run uses the CLI
+values even if the answer is `n`. `--yes` answers configuration prompts
+yes; on a non-terminal stdin without `--yes`, prompts assume `n` so
+unattended runs never block or silently overwrite saved settings.
+
+`--no-config` suppresses config handling for the current subcommand:
+`link` neither reads nor writes `<source>/.musman.toml`, and `sync`
+neither reads nor writes the source link config or the target sync
+config. `sync --no-config` therefore requires link settings on the
+command line. `--dry-run` never writes or updates config files; it
+prints `would write ...` or `would update ...` when a config would
+change.
 
 ## Building
 
@@ -91,63 +161,78 @@ The binary lands in `target/release/musman`.
 ## Usage
 
 ```
-musman link -f flac -f mp3 [options]
-musman sync -f flac -f mp3 -t TARGET (--only EXT | --best) [options]
+musman link [-f FORMAT]... [options]
+musman sync -t TARGET [--only EXT | --best] [-f FORMAT]... [options]
 
 Common options:
-  -f, --format <FORMAT>   managed format; repeatable, first = highest quality (required)
   -s, --source <DIR>      directory containing the original music files   [default: .]
+  -f, --format <FORMAT>   managed format; repeatable, first = highest quality
+                          (may be omitted when a link config supplies it)
+  -i, --formats <DIR>     per-format link-tree root
+                          [link default: formats, sync default: <source>/formats]
+  -m, --max-qual <DIR>    best-quality link-tree root
+                          [link default: max_qual, sync default: <source>/max_qual]
       --dry-run           report planned actions without touching the disk
   -v, --verbose           print one line per file action
-
-link options:
-  -m, --max-qual <DIR>    root for the best-quality link tree              [default: max_qual]
-  -i, --formats <DIR>     root for the per-format link trees               [default: formats]
+      --no-config         ignore and suppress the relevant .musman.toml file(s)
+      --yes               answer configuration prompts with yes
 
 sync options:
   -t, --target <DIR>      destination root for the copied tree   (required)
       --only <EXT>        sync exactly one managed format
       --best              sync the best-quality file per track
-      --no-delete         keep files that are no longer selected (no mirroring)
-  -i, --formats <DIR>     derived per-format tree to exclude from the source scan [default: <source>/formats]
-  -m, --max-qual <DIR>    derived best-quality tree to exclude from the source scan [default: <source>/max_qual]
+      --no-delete[=BOOL]  keep files that are no longer selected (no mirroring)
+                          [bare flag = true; use --no-delete=false to force mirroring]
 ```
 
-On `sync`, `-i`/`-m` do not create trees; they name the derived `link`
-trees that live inside the source directory and are ignored while
-scanning, so a library that already contains a `formats/`/`max_qual/`
-tree is never copied back into itself. By default they point at
-`<source>/formats` and `<source>/max_qual`; if your exclusion roots point
-somewhere else but the source still contains such a tree, musman warns
-that its files will be treated as source content.
+On `sync`, `-i`/`-m` do not merely exclude trees from the source scan;
+together with `-f`, or on their own, they make `sync` perform the
+equivalent `link` operation first and then sync. If only `-i`/`-m` are
+given, the managed formats still come from the CLI or the link config.
+By default the sync exclusion roots point at `<source>/formats` and
+`<source>/max_qual`; if your exclusion roots point somewhere else but the
+source still contains such a tree, musman warns that its files will be
+treated as source content.
 
 Examples:
 
 ```sh
-# Maintain the derived hard-link trees in a library on NFS:
-musman link -s /mnt/music -i /mnt/music/formats -m /mnt/music/max_qual -f flac -f mp3
+# First link run: saves /mnt/music/.musman.toml.
+musman link -s /mnt/music -f flac -f mp3
 
-# Copy the best quality of a whole library onto a USB stick:
-musman sync -s /mnt/music -t /run/media/you/MUSIC --best -f flac -f mp3 -f ogg
+# Later link run: reads formats and roots from the saved link config.
+musman link -s /mnt/music
 
-# Only the lossless files, and keep anything already on the stick:
-musman sync -s /mnt/music -t /run/media/you/MUSIC --only flac --no-delete -f flac -f mp3
+# First sync run with link settings: links, then syncs; saves both configs.
+musman sync -s /mnt/music -t /run/media/you/MUSIC --best -f flac -f mp3 --yes
+
+# Later pure sync run: reads the link config and the target sync config.
+musman sync -s /mnt/music -t /run/media/you/MUSIC
+
+# Override the saved selection and no_delete for this run, and update
+# the saved sync config to match.
+musman sync -s /mnt/music -t /run/media/you/MUSIC --only flac --no-delete=false --yes
+
+# One-off sync without reading or writing any config files.
+musman sync -s /mnt/music -t /run/media/you/MUSIC --only flac -f flac -f mp3 --no-config
 
 # See what a sync would do without changing anything:
 musman sync -s /mnt/music -t /run/media/you/MUSIC --best -f flac -f mp3 --dry-run -v
 ```
 
-Exit codes: `0` success, `1` runtime error (some files could not be
-linked, copied or removed; they are listed on stdout), `2` usage error
-or a refused layout.
+Exit codes: `0` success, `1` runtime or config read/write error (failed
+file actions are listed on stdout), `2` usage error, a refused layout,
+or a declined link-then-sync prompt.
 
 ### Safety
 
-- Only the source tree's regular files are read; nothing is ever
-  written, removed or renamed inside it.
+- Only the source tree's regular music files are read; the only source
+  file `musman` creates or updates is `<source>/.musman.toml`, unless
+  `--no-config` is used.
 - `link` creates only hard links and removes only files inside the two
   output trees. `sync` writes only inside the target and (when
-  mirroring) removes only files inside the target.
+  mirroring) removes only files inside the target, never deleting the
+  target's own `.musman.toml`.
 - Symlinks, hidden files and dotted titles are handled like `find`; a
   name without a usable extension (e.g. `README`, `.hidden`) is
   ignored, and the *last* dot wins (`1. Title.flac` is a `flac`).
@@ -165,7 +250,10 @@ or a refused layout.
 `would replace` / `would remove` / `would prune` (for `link`) or
 `would copy` / `ok` (up-to-date files) / `would remove` / `would prune`
 (for `sync`) lines plus the final summary, without creating or
-deleting anything (not even the output/target roots).
+deleting anything (not even the output/target roots). It also prints
+`would write ...` / `would update ...` when a config file would be
+written or changed, and `would link and sync` for a sync command that
+includes link settings.
 
 ## Performance notes (NFS)
 
@@ -199,15 +287,16 @@ slow mount:
 cargo test
 ```
 
-- 34 unit tests for the walker, scanner, linker, copier, name parsing
-  and tree reconciliation.
-- 32 end-to-end tests (`tests/integration.rs`) that run the compiled
+- 42 unit tests for the walker, scanner, linker, copier, name parsing,
+  tree reconciliation, and the `.musman.toml` config store.
+- 52 end-to-end tests (`tests/integration.rs`) that run the compiled
   binary against real trees shaped like real libraries
   (`artist/album/song.ext`, albums of 1–15 songs) and assert exact file
   sets, directory structure, hard-link inode identity, exit codes and
   side effects: idempotency, mutation reconciliation, sparse/dense
-   layouts, odd filenames, unsafe-layout refusals, `.stfolder` being
-   left alone, dry-run, `sync` add/update/remove and mtime preservation,
-   and a seeded randomized property test against an independent
-   expected-state builder, a differential test against
-   `legacy/create_music_links.sh`, and a 15,000-song performance smoke.
+  layouts, odd filenames, unsafe-layout refusals, `.stfolder` being
+  left alone, dry-run, config write/conflict/prompt behavior,
+  `sync` add/update/remove and mtime preservation, and a seeded
+  randomized property test against an independent expected-state
+  builder, a differential test against `legacy/create_music_links.sh`,
+  and a 15,000-song performance smoke.

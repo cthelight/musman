@@ -33,6 +33,24 @@ impl Stats {
         !self.errors.is_empty()
     }
 
+    /// Merge another run's counters into this one.
+    ///
+    /// Source-scan counters are replaced (a `link`-then-`sync` run scans the
+    /// same source twice); action counters are summed.
+    pub fn add(&mut self, other: Stats) {
+        self.regular_files = other.regular_files;
+        self.managed_files = other.managed_files;
+        self.tracks = other.tracks;
+        self.links_created += other.links_created;
+        self.links_replaced += other.links_replaced;
+        self.links_up_to_date += other.links_up_to_date;
+        self.files_copied += other.files_copied;
+        self.files_up_to_date += other.files_up_to_date;
+        self.files_removed += other.files_removed;
+        self.dirs_removed += other.dirs_removed;
+        self.errors.extend(other.errors);
+    }
+
     /// A short human-readable summary of the run.
     pub fn summary(&self) -> String {
         let mut lines = vec![format!(

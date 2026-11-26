@@ -340,6 +340,8 @@ fn extend_common(
         formats.display().to_string(),
         "-m".into(),
         max_qual.display().to_string(),
+        "--no-config".into(),
+        "--yes".into(),
     ]);
     for format in FORMATS {
         args.push("-f".into());
@@ -806,6 +808,8 @@ fn duplicate_format_flags_are_deduped() {
         "mp3".into(),
         "-f".into(),
         "flac".into(),
+        "--no-config".into(),
+        "--yes".into(),
     ];
     let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let (out, _) = run_ok(&args);
@@ -1616,6 +1620,8 @@ fn sync_does_not_copy_derived_trees_from_the_source() {
         "-f".into(),
         "ogg".into(),
         "--best".into(),
+        "--no-config".into(),
+        "--yes".into(),
     ];
     let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     run_ok(&args);
@@ -1656,10 +1662,773 @@ fn sync_warns_when_an_in_source_tree_is_not_excluded() {
         "flac",
         "--only",
         "flac",
+        "--no-config",
+        "--yes",
     ]);
     assert_eq!(code, 0, "the warning must not fail the run: {err}");
     assert!(
         err.contains("is inside the source but not excluded by -i/-m"),
         "{err}"
     );
+}
+
+// ---------------------------------------------------------------------
+// config files and prompts
+// ---------------------------------------------------------------------
+
+fn link_config_path(src: &Path) -> PathBuf {
+    src.join(".musman.toml")
+}
+
+fn sync_config_path(target: &Path) -> PathBuf {
+    target.join(".musman.toml")
+}
+
+fn read_saved_link(src: &Path) -> musman::SavedLink {
+    let content = fs::read_to_string(link_config_path(src)).unwrap();
+    toml::from_str(&content).unwrap()
+}
+
+fn read_saved_sync(target: &Path) -> musman::SavedSync {
+    let content = fs::read_to_string(sync_config_path(target)).unwrap();
+    toml::from_str(&content).unwrap()
+}
+
+/// Like `assert_sync_matches`, but expects the sync config file itself at
+/// the target root.
+fn assert_sync_matches_with_config(target: &Path, expected: &BTreeMap<String, PathBuf>) {
+    let actual = list_files(target);
+    let actual_rels: BTreeSet<String> = actual.keys().cloned().collect();
+    let expected_rels: BTreeSet<String> = expected
+        .keys()
+        .cloned()
+        .chain(std::iter::once(".musman.toml".to_string()))
+        .collect();
+    assert_eq!(
+        actual_rels,
+        expected_rels,
+        "file set mismatch in {}",
+        target.display()
+    );
+    for (rel, src_path) in expected {
+        let actual_path = actual.get(rel).unwrap();
+        assert_eq!(
+            fs::read(actual_path).unwrap(),
+            fs::read(src_path).unwrap(),
+            "{rel} content differs from its source"
+        );
+        assert_ne!(
+            inode(actual_path),
+            inode(src_path),
+            "{rel} must be an independent copy, not a hard link"
+        );
+    }
+    assert_dirs_match(target, expected);
+}
+
+#[test]
+fn link_first_run_writes_relative_link_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+    ]);
+
+    let saved = read_saved_link(&src);
+    assert_eq!(
+        saved.formats,
+        vec!["flac".to_string(), "mp3".to_string(), "ogg".to_string()]
+    );
+    assert_eq!(saved.formats_root, "../formats");
+    assert_eq!(saved.max_qual_root, "../max_qual");
+
+    let (expected_formats, expected_tracks) =
+        expected_state(&src, FORMATS, &[formats.clone(), max_qual.clone()]);
+    assert_tree_matches(&formats, &expected_formats);
+    assert_tree_matches(&max_qual, &expected_tracks);
+}
+
+#[test]
+fn link_bare_rerun_uses_saved_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+    ]);
+
+    let (out, _) = run_ok(&["link", "-s", &src.display().to_string()]);
+    assert!(out.contains("0 created"), "re-run must be a no-op: {out}");
+    assert!(out.contains("0 replaced"), "re-run must be a no-op: {out}");
+
+    let saved = read_saved_link(&src);
+    assert_eq!(saved.formats.len(), 3);
+}
+
+#[test]
+fn link_conflicting_cli_settings_with_yes_updates_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+    ]);
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "--yes",
+    ]);
+
+    let saved = read_saved_link(&src);
+    assert_eq!(saved.formats, vec!["flac".to_string()]);
+    assert_eq!(saved.formats_root, "../formats");
+    assert_eq!(saved.max_qual_root, "../max_qual");
+}
+
+#[test]
+fn link_conflicting_cli_settings_without_yes_keeps_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+    ]);
+
+    let (code, _out, err) = run(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+    ]);
+    assert_eq!(code, 0, "the run must still happen: {err}");
+    assert!(err.contains("assuming no"), "{err}");
+    assert!(err.contains("keeping existing link config"), "{err}");
+
+    let saved = read_saved_link(&src);
+    assert_eq!(saved.formats.len(), 3);
+}
+
+#[test]
+fn sync_pure_uses_link_config_and_writes_sync_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+    ]);
+
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--best",
+    ]);
+
+    let saved = read_saved_sync(&target);
+    assert_eq!(saved.selection, "best");
+    assert!(!saved.no_delete);
+
+    let expected = sync_expected(&src, &[formats.clone(), max_qual.clone()], None);
+    assert_sync_matches_with_config(&target, &expected);
+}
+
+#[test]
+fn sync_missing_link_config_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let target = tmp.path().join("target");
+
+    let (code, _out, err) = run(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--best",
+    ]);
+    assert_eq!(code, 2, "missing link config must be a usage error: {err}");
+    assert!(err.contains("no link config"), "{err}");
+}
+
+#[test]
+fn sync_link_then_sync_first_run_writes_both_configs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+        "--best",
+        "--yes",
+    ]);
+
+    let link_saved = read_saved_link(&src);
+    assert_eq!(link_saved.formats.len(), 3);
+    assert_eq!(link_saved.formats_root, "../formats");
+    assert_eq!(link_saved.max_qual_root, "../max_qual");
+
+    let sync_saved = read_saved_sync(&target);
+    assert_eq!(sync_saved.selection, "best");
+    assert!(!sync_saved.no_delete);
+
+    let expected = sync_expected(&src, &[formats.clone(), max_qual.clone()], None);
+    assert_sync_matches_with_config(&target, &expected);
+}
+
+#[test]
+fn sync_link_then_sync_without_yes_aborts_at_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+
+    let (code, _out, err) = run(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "-f",
+        "flac",
+        "--best",
+    ]);
+    assert_eq!(code, 2, "the gate must abort without --yes: {err}");
+    assert!(err.contains("assuming no"), "{err}");
+    assert!(err.contains("aborting"), "{err}");
+    assert!(!link_config_path(&src).exists());
+    assert!(!sync_config_path(&target).exists());
+    assert!(!target.exists());
+    assert!(!formats.exists());
+}
+
+#[test]
+fn sync_link_then_sync_with_yes_updates_conflicting_configs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+        "--best",
+        "--yes",
+    ]);
+
+    fs::remove_dir_all(&target).unwrap();
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "--only",
+        "mp3",
+        "--no-delete",
+        "--yes",
+    ]);
+
+    let link_saved = read_saved_link(&src);
+    assert_eq!(
+        link_saved.formats,
+        vec!["flac".to_string(), "mp3".to_string()]
+    );
+
+    let sync_saved = read_saved_sync(&target);
+    assert_eq!(sync_saved.selection, "only:mp3");
+    assert!(sync_saved.no_delete);
+
+    let expected = sync_expected(&src, &[formats.clone(), max_qual.clone()], Some("mp3"));
+    assert_sync_matches_with_config(&target, &expected);
+}
+
+#[test]
+fn sync_pure_conflicting_selection_without_yes_keeps_sync_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+    ]);
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--best",
+    ]);
+
+    let (code, _out, err) = run(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--only",
+        "flac",
+    ]);
+    assert_eq!(code, 0, "the sync must still happen: {err}");
+    assert!(err.contains("assuming no"), "{err}");
+    assert!(err.contains("keeping existing sync config"), "{err}");
+
+    let saved = read_saved_sync(&target);
+    assert_eq!(saved.selection, "best");
+
+    let expected = sync_expected(&src, &[formats.clone(), max_qual.clone()], Some("flac"));
+    assert_sync_matches_with_config(&target, &expected);
+}
+
+#[test]
+fn sync_no_delete_false_overrides_saved_true() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+    ]);
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--best",
+        "--no-delete",
+    ]);
+    assert!(read_saved_sync(&target).no_delete);
+
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--best",
+        "--no-delete=false",
+        "--yes",
+    ]);
+    assert!(!read_saved_sync(&target).no_delete);
+}
+
+#[test]
+fn sync_config_survives_mirror_deletion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+    ]);
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--best",
+    ]);
+
+    let stale = target.join("stale.txt");
+    write_file(&stale, "stale");
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--best",
+    ]);
+
+    assert!(!stale.exists(), "stale file must be removed");
+    assert!(
+        sync_config_path(&target).exists(),
+        "the sync config must survive mirror deletion"
+    );
+}
+
+#[test]
+fn no_config_suppresses_config_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "--no-config",
+    ]);
+    assert!(!link_config_path(&src).exists());
+
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "flac",
+        "--no-config",
+        "--yes",
+    ]);
+    assert!(!link_config_path(&src).exists());
+    assert!(!sync_config_path(&target).exists());
+}
+
+#[test]
+fn dry_run_does_not_write_or_update_configs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "-f",
+        "mp3",
+        "-f",
+        "ogg",
+    ]);
+    run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--best",
+    ]);
+
+    let link_before = fs::read_to_string(link_config_path(&src)).unwrap();
+    let sync_before = fs::read_to_string(sync_config_path(&target)).unwrap();
+    let formats_before = snapshot(&formats);
+    let target_before = snapshot(&target);
+
+    let (out, _) = run_ok(&[
+        "link",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-f",
+        "flac",
+        "--dry-run",
+    ]);
+    assert!(
+        out.contains("would update link config"),
+        "dry run must report the planned config update: {out}"
+    );
+    assert_eq!(
+        fs::read_to_string(link_config_path(&src)).unwrap(),
+        link_before
+    );
+    assert_eq!(snapshot(&formats), formats_before);
+
+    let (out, _) = run_ok(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--only",
+        "flac",
+        "--dry-run",
+    ]);
+    assert!(
+        out.contains("would update sync config"),
+        "dry run must report the planned config update: {out}"
+    );
+    assert_eq!(
+        fs::read_to_string(sync_config_path(&target)).unwrap(),
+        sync_before
+    );
+    assert_eq!(snapshot(&target), target_before);
+}
+
+#[test]
+fn relative_link_config_works_from_another_mount_point() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src1 = tmp.path().join("src1");
+    let src2 = tmp.path().join("src2");
+    write_file(&src1.join("Artist/Album/01 Song.flac"), "flac");
+
+    run_ok(&[
+        "link",
+        "-s",
+        &src1.display().to_string(),
+        "-i",
+        &src1.join("formats").display().to_string(),
+        "-m",
+        &src1.join("max_qual").display().to_string(),
+        "-f",
+        "flac",
+    ]);
+
+    let saved = read_saved_link(&src1);
+    assert_eq!(saved.formats_root, "formats");
+    assert_eq!(saved.max_qual_root, "max_qual");
+
+    write_file(&src2.join("Artist/Album/01 Song.flac"), "flac");
+    fs::copy(link_config_path(&src1), link_config_path(&src2)).unwrap();
+
+    run_ok(&["link", "-s", &src2.display().to_string()]);
+
+    let linked = src2.join("formats/flac/Artist/Album/01 Song.flac");
+    assert!(linked.is_file());
+    assert_eq!(
+        inode(&linked),
+        inode(&src2.join("Artist/Album/01 Song.flac"))
+    );
+}
+
+#[test]
+fn invalid_saved_sync_selection_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    let target = tmp.path().join("target");
+    fs::create_dir_all(&target).unwrap();
+
+    fs::write(
+        link_config_path(&src),
+        "formats = [\"flac\"]\nformats_root = \"formats\"\nmax_qual_root = \"max_qual\"\n",
+    )
+    .unwrap();
+    fs::write(sync_config_path(&target), "selection = \"bogus\"\n").unwrap();
+
+    let (code, _out, err) = run(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-t",
+        &target.display().to_string(),
+        "--best",
+    ]);
+    assert_eq!(code, 1, "an invalid sync config must fail: {err}");
+    assert!(err.contains("invalid selection"), "{err}");
+}
+
+#[test]
+fn malformed_link_config_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(link_config_path(&src), "not toml").unwrap();
+
+    let (code, _out, err) = run(&["link", "-s", &src.display().to_string(), "-f", "flac"]);
+    assert_eq!(code, 1, "a malformed link config must fail: {err}");
+    assert!(err.contains("parse link config"), "{err}");
 }

@@ -26,9 +26,15 @@ mod link;
 mod names;
 mod scan;
 mod stats;
+mod store;
 mod walk;
 
 pub use stats::Stats;
+pub use store::{
+    CONFIG_FILE_NAME, SavedLink, SavedSync, confirm, dedup_formats, link_config_path, load_link,
+    load_sync, parse_selection, relative_path, save_link, save_sync, selection_to_string,
+    sync_config_path,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -55,6 +61,8 @@ pub struct Config {
     pub verbose: bool,
     /// Report planned actions without touching the disk.
     pub dry_run: bool,
+    /// For `sync`, the sync config file to protect from mirror deletion.
+    pub config_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -70,6 +78,7 @@ impl Config {
         format_order: Vec<String>,
         verbose: bool,
         dry_run: bool,
+        config_path: Option<PathBuf>,
     ) -> Result<Self> {
         if format_order.is_empty() {
             bail!("at least one format is required (use -f)");
@@ -97,6 +106,7 @@ impl Config {
             format_order,
             verbose,
             dry_run,
+            config_path,
         })
     }
 }
@@ -129,7 +139,7 @@ fn is_under(path: &Path, ancestor: &Path) -> bool {
 
 /// Canonicalize a path whose final components may not exist yet, by
 /// canonicalizing the deepest existing ancestor and re-joining the rest.
-fn resolve_existing(p: &Path) -> Result<PathBuf> {
+pub fn resolve_existing(p: &Path) -> Result<PathBuf> {
     let mut missing = Vec::new();
     let mut cur = p.to_path_buf();
     while !cur.exists() {
@@ -338,7 +348,12 @@ pub fn run_sync(
     // 5. Unless --no-delete, remove everything the desired state does not
     //    want, so the destination mirrors the selected view exactly.
     if !no_delete {
-        let keep: HashSet<PathBuf> = pairs.iter().map(|(_, d, _, _)| d.clone()).collect();
+        let mut keep: HashSet<PathBuf> = pairs.iter().map(|(_, d, _, _)| d.clone()).collect();
+        if let Some(config_path) = &cfg.config_path
+            && config_path.starts_with(target)
+        {
+            keep.insert(config_path.clone());
+        }
         let (removed, dirs) = clean::reconcile_tree(target, &keep, cfg.dry_run, cfg.verbose)?;
         stats.files_removed += removed.len();
         stats.dirs_removed += dirs;
