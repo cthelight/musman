@@ -1343,6 +1343,31 @@ fn sync_preserves_source_mtime() {
 }
 
 #[test]
+fn no_delete_removes_stale_temp_files_keeps_other_data() {
+    let sb = make_sync_sandbox();
+    sb.sync(&["--only", "flac"], &["--no-delete"]);
+
+    // Simulate the litter a crashed run leaves behind, next to data that is
+    // not part of the desired state but which --no-delete must keep.
+    let tmp_file = sb.target.join("Artist/Album A/01 Intro.flac.musman-tmp");
+    write_file(&tmp_file, "partial copy");
+    let other = sb.target.join("Artist/Album A/notes.txt");
+    write_file(&other, "user data");
+
+    let (out, stderr) = sb.sync(&["--only", "flac"], &["--no-delete", "-v"]);
+    assert!(
+        !tmp_file.exists(),
+        "stale temp file should be removed: {out} {stderr}"
+    );
+    assert!(
+        other.exists(),
+        "unrelated data must survive --no-delete: {out} {stderr}"
+    );
+    assert!(out.contains("remove"), "removal should be reported: {out}");
+    assert!(sb.target.join("Artist/Album A/01 Intro.flac").is_file());
+}
+
+#[test]
 fn sync_dry_run_writes_nothing() {
     let sb = make_sync_sandbox();
 

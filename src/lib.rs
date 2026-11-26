@@ -336,6 +336,11 @@ pub fn run_sync(
         let (removed, dirs) = clean::reconcile_tree(target, &keep, cfg.dry_run, cfg.verbose)?;
         stats.files_removed += removed.len();
         stats.dirs_removed += dirs;
+    } else {
+        // --no-delete keeps files the view no longer contains, but the
+        // in-progress copies of a crashed run are our litter, not user
+        // data: remove them.
+        stats.files_removed += copy::remove_stale_temps(target, cfg.dry_run, cfg.verbose)?;
     }
 
     Ok(stats)

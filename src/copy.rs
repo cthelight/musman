@@ -11,8 +11,9 @@
 //!
 //! Copies are atomic: contents go to a `<dest>.musman-tmp` file, whose mtime
 //! is set to the source's, then it is renamed over `dest`. A crash mid-copy
-//! leaves only the temp file behind, which the reconciliation pass removes
-//! (it is not part of the desired state).
+//! leaves only the temp file behind; mirror-mode reconciliation removes it
+//! (it is not part of the desired state), and `--no-delete` runs remove it
+//! via [`remove_stale_temps`].
 
 use std::ffi::OsString;
 use std::fs::{self, File, FileTimes};
@@ -21,6 +22,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
+
+use crate::walk;
 
 /// Tolerance applied when comparing mtimes.
 ///
@@ -162,6 +166,52 @@ fn temp_path(dest: &Path) -> PathBuf {
 
 fn copy_context(src: &Path, dest: &Path) -> String {
     format!("copy {} -> {} failed", src.display(), dest.display())
+}
+
+/// Remove the in-progress temp files a crashed run left under `root`.
+///
+/// Mirror-mode reconciliation already removes them (they are not part of
+/// the desired state); this is what cleans them on `--no-delete` runs,
+/// where nothing else walks the target. Only regular files whose name ends
+/// in `TEMP_SUFFIX` are removed; everything else is untouched.
+pub fn remove_stale_temps(root: &Path, dry_run: bool, verbose: bool) -> Result<usize> {
+    if !root.is_dir() {
+        return Ok(0);
+    }
+    let stale: Vec<PathBuf> = walk::walk_all(root)
+        .into_iter()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let is_temp = entry.path.file_name().is_some_and(|name| {
+                name.to_str()
+                    .is_some_and(|name| name.ends_with(TEMP_SUFFIX))
+            });
+            (entry.kind == walk::Kind::File && is_temp).then_some(entry.path)
+        })
+        .collect();
+    let results: Vec<Result<()>> = stale
+        .par_iter()
+        .map(|path| {
+            if verbose {
+                println!(
+                    "{}  {}",
+                    if dry_run { "would remove" } else { "remove" },
+                    path.display()
+                );
+            }
+            if !dry_run {
+                fs::remove_file(path)
+                    .with_context(|| format!("remove stale temp file {}", path.display()))?;
+            }
+            Ok(())
+        })
+        .collect();
+    let mut removed = 0;
+    for result in results {
+        result?;
+        removed += 1;
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
