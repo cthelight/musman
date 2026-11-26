@@ -37,9 +37,11 @@ use rayon::prelude::*;
 pub struct Config {
     /// Canonical source directory (the music library, never modified).
     pub source: PathBuf,
-    /// Canonical root for the per-format link trees.
+    /// Canonical root for the per-format link trees. For `sync` this path
+    /// is only used to exclude the derived tree from the source scan.
     pub formats_root: PathBuf,
-    /// Canonical root for the best-quality link tree.
+    /// Canonical root for the best-quality link tree. For `sync` this path
+    /// is only used to exclude the derived tree from the source scan.
     pub max_qual_root: PathBuf,
     /// Managed formats, best first (duplicates removed).
     pub format_order: Vec<String>,
@@ -264,6 +266,20 @@ pub fn run_sync(
     // 1. Scan the source tree once, pruning the link output roots so we
     //    never copy our own derived trees.
     let excluded = vec![cfg.formats_root.clone(), cfg.max_qual_root.clone()];
+    // Warn (but do not refuse) when the source appears to hold a derived
+    // tree the exclusion roots do not cover: its files would otherwise be
+    // copied as if they were source content.
+    for excluded_root in &excluded {
+        if let Some(name) = excluded_root.file_name() {
+            let in_source = cfg.source.join(name);
+            if !is_under(excluded_root, &cfg.source) && in_source.is_dir() {
+                eprintln!(
+                    "musman: warning: {} is inside the source but not excluded by -i/-m; its files are treated as source content",
+                    in_source.display()
+                );
+            }
+        }
+    }
     let scan = scan::scan(&cfg.source, &excluded, &format_index)?;
     stats.regular_files = scan.regular_files;
     stats.managed_files = scan.files.len();

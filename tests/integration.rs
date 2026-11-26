@@ -1493,3 +1493,85 @@ fn sync_source_tree_is_never_modified() {
     sb.sync(&["--best"], &[]);
     assert_eq!(snapshot(&sb.src), before, "the source tree was modified");
 }
+
+/// A library that already contains the derived `link` trees (the
+/// documented state after a `link` run) must not have them copied into
+/// the target when no `-i`/`-m` is given: the default exclusion roots
+/// are anchored at the source, not at the CWD.
+#[test]
+fn sync_does_not_copy_derived_trees_from_the_source() {
+    let sb = make_sync_sandbox();
+    // Build the derived trees inside the source, as `musman link` would.
+    let (format_links, track_links) = expected_state(&sb.src, FORMATS, &[]);
+    for (rel, src_path) in &format_links {
+        let dest = sb.src.join("formats").join(rel);
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::copy(src_path, &dest).unwrap();
+    }
+    for (rel, src_path) in &track_links {
+        let dest = sb.src.join("max_qual").join(rel);
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::copy(src_path, &dest).unwrap();
+    }
+
+    // Sync without -i/-m: the defaults must exclude the in-source trees.
+    let args: Vec<String> = vec![
+        "sync".into(),
+        "-s".into(),
+        sb.src.display().to_string(),
+        "-t".into(),
+        sb.target.display().to_string(),
+        "-f".into(),
+        "flac".into(),
+        "-f".into(),
+        "mp3".into(),
+        "-f".into(),
+        "ogg".into(),
+        "--best".into(),
+    ];
+    let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run_ok(&args);
+
+    let expected = sync_expected(
+        &sb.src,
+        &[sb.src.join("formats"), sb.src.join("max_qual")],
+        None,
+    );
+    assert_eq!(expected.len(), 4, "four tracks expected: {expected:?}");
+    assert!(
+        expected
+            .values()
+            .all(|p| !p.starts_with(sb.src.join("formats"))),
+        "derived trees must not be selected: {expected:?}"
+    );
+    assert_sync_matches(&sb.target, &expected);
+}
+
+/// When the exclusion roots point outside the source but the source still
+/// contains a tree with a matching name, musman warns (and still runs).
+#[test]
+fn sync_warns_when_an_in_source_tree_is_not_excluded() {
+    let sb = make_sync_sandbox();
+    write_file(&sb.src.join("formats/flac/x.flac"), "f");
+
+    let (code, _out, err) = run(&[
+        "sync",
+        "-s",
+        &sb.src.display().to_string(),
+        "-i",
+        &sb.formats.display().to_string(),
+        "-m",
+        &sb.max_qual.display().to_string(),
+        "-t",
+        &sb.target.display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "flac",
+    ]);
+    assert_eq!(code, 0, "the warning must not fail the run: {err}");
+    assert!(
+        err.contains("is inside the source but not excluded by -i/-m"),
+        "{err}"
+    );
+}

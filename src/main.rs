@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Error;
@@ -42,23 +43,17 @@ struct CommonArgs {
     #[arg(short = 's', long = "source", default_value = ".", value_name = "DIR")]
     source: std::path::PathBuf,
 
-    /// Root for the per-format link trees.
-    #[arg(
-        short = 'i',
-        long = "formats",
-        default_value = "formats",
-        value_name = "DIR"
-    )]
-    formats_root: std::path::PathBuf,
+    /// Root for the per-format link trees. For `link` the default is
+    /// `./formats`; for `sync` the default is `<source>/formats` (the
+    /// derived tree is excluded from the scan, never created).
+    #[arg(short = 'i', long = "formats", value_name = "DIR")]
+    formats_root: Option<std::path::PathBuf>,
 
     /// Root for the best-quality link tree (kept non-empty for syncthing).
-    #[arg(
-        short = 'm',
-        long = "max-qual",
-        default_value = "max_qual",
-        value_name = "DIR"
-    )]
-    max_qual: std::path::PathBuf,
+    /// For `link` the default is `./max_qual`; for `sync` the default is
+    /// `<source>/max_qual` (excluded from the scan, never created).
+    #[arg(short = 'm', long = "max-qual", value_name = "DIR")]
+    max_qual: Option<std::path::PathBuf>,
 
     /// Print one line per file action.
     #[arg(short = 'v', long = "verbose")]
@@ -116,11 +111,15 @@ fn main() -> ExitCode {
 
 /// Build a validated `Config` from the shared arguments, exiting 2 on
 /// a usage or layout problem.
-fn make_config(common: &CommonArgs) -> Option<musman::Config> {
+fn make_config(
+    common: &CommonArgs,
+    formats_root: PathBuf,
+    max_qual: PathBuf,
+) -> Option<musman::Config> {
     match musman::Config::new(
         common.source.clone(),
-        common.formats_root.clone(),
-        common.max_qual.clone(),
+        formats_root,
+        max_qual,
         common.formats.clone(),
         common.verbose,
         common.dry_run,
@@ -133,8 +132,28 @@ fn make_config(common: &CommonArgs) -> Option<musman::Config> {
     }
 }
 
+/// The default for one of `sync`'s `-i`/`-m`: the derived tree at the top
+/// of the source. Falls back to the bare directory name when the source
+/// cannot be resolved (`Config::new` then reports the real error).
+fn sync_default_root(source: &Path, name: &str) -> PathBuf {
+    fs::canonicalize(source)
+        .ok()
+        .map(|canonical| canonical.join(name))
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
 fn run_link(common: &CommonArgs) -> ExitCode {
-    let Some(config) = make_config(common) else {
+    // `link` creates the trees it is given, so the defaults are relative
+    // to the current directory (the classic "run from inside the library").
+    let formats_root = common
+        .formats_root
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("formats"));
+    let max_qual = common
+        .max_qual
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("max_qual"));
+    let Some(config) = make_config(common, formats_root, max_qual) else {
         return ExitCode::from(2);
     };
     execute(musman::run(&config))
@@ -147,7 +166,20 @@ fn run_sync(
     best: bool,
     no_delete: bool,
 ) -> ExitCode {
-    let Some(config) = make_config(common) else {
+    // `sync` does not create the trees named by `-i`/`-m`; they are the
+    // derived `link` trees that live inside the source and must be skipped
+    // while scanning. The defaults are therefore anchored at the source,
+    // not the CWD, so a library that already contains a `formats/` or
+    // `max_qual/` tree is never copied back into the target.
+    let formats_root = common
+        .formats_root
+        .clone()
+        .unwrap_or_else(|| sync_default_root(&common.source, "formats"));
+    let max_qual = common
+        .max_qual
+        .clone()
+        .unwrap_or_else(|| sync_default_root(&common.source, "max_qual"));
+    let Some(config) = make_config(common, formats_root, max_qual) else {
         return ExitCode::from(2);
     };
 

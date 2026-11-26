@@ -109,14 +109,17 @@ sync options:
       --only <EXT>        sync exactly one managed format
       --best              sync the best-quality file per track
       --no-delete         keep files that are no longer selected (no mirroring)
-  -i, --formats <DIR>     derived per-format tree to exclude from the source scan [default: formats]
-  -m, --max-qual <DIR>    derived best-quality tree to exclude from the source scan [default: max_qual]
+  -i, --formats <DIR>     derived per-format tree to exclude from the source scan [default: <source>/formats]
+  -m, --max-qual <DIR>    derived best-quality tree to exclude from the source scan [default: <source>/max_qual]
 ```
 
 On `sync`, `-i`/`-m` do not create trees; they name the derived `link`
-trees that live inside the source directory and should be ignored while
-scanning (so a library that already contains a `formats/`/`max_qual/`
-tree is not copied back into itself).
+trees that live inside the source directory and are ignored while
+scanning, so a library that already contains a `formats/`/`max_qual/`
+tree is never copied back into itself. By default they point at
+`<source>/formats` and `<source>/max_qual`; if your exclusion roots point
+somewhere else but the source still contains such a tree, musman warns
+that its files will be treated as source content.
 
 Examples:
 
