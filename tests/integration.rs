@@ -1446,6 +1446,69 @@ fn sync_target_layout_is_checked() {
     ]);
     assert_eq!(code, 2, "source inside target must be refused");
     assert!(err.contains("inside the sync target"), "{err}");
+
+    // Target == a link output directory.
+    let (code, _, err) = run(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &formats.display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "flac",
+    ]);
+    assert_eq!(code, 2, "target == link output must be refused");
+    assert!(err.contains("same as a link output directory"), "{err}");
+
+    // Target inside a link output directory.
+    let (code, _, err) = run(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &formats.join("device").display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "flac",
+    ]);
+    assert_eq!(code, 2, "target inside link output must be refused");
+    assert!(err.contains("inside a link output directory"), "{err}");
+
+    // A link output directory inside the target (source stays outside).
+    let outside_src = tmp.path().join("outside_src");
+    write_file(&outside_src.join("Artist/Album/01 Song.flac"), "flac");
+    let container = tmp.path().join("container");
+    let inner_link = container.join("formats");
+    let other_max_qual = tmp.path().join("other_max_qual");
+    let (code, _, err) = run(&[
+        "sync",
+        "-s",
+        &outside_src.display().to_string(),
+        "-i",
+        &inner_link.display().to_string(),
+        "-m",
+        &other_max_qual.display().to_string(),
+        "-t",
+        &container.display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "flac",
+    ]);
+    assert_eq!(code, 2, "link output inside target must be refused");
+    assert!(err.contains("a link output directory"), "{err}");
+    assert!(err.contains("inside the sync target"), "{err}");
 }
 
 #[test]

@@ -192,8 +192,14 @@ fn run_sync(
         return ExitCode::from(2);
     }
 
-    // Resolve the target and refuse layouts that could write into the source.
-    let target = match musman::prepare_sync_target(&config.source, target.to_path_buf()) {
+    // Resolve the target and refuse layouts that could write into the
+    // source or a link output directory.
+    let target = match musman::prepare_sync_target(
+        &config.source,
+        &config.formats_root,
+        &config.max_qual_root,
+        target.to_path_buf(),
+    ) {
         Ok(target) => target,
         Err(err) => {
             eprintln!("musman: {err:#}");

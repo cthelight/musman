@@ -347,14 +347,19 @@ pub fn run_sync(
 }
 
 /// Resolve the sync destination and refuse layouts that could write into
-/// the source tree.
-pub fn prepare_sync_target(source: &Path, target: PathBuf) -> Result<PathBuf> {
+/// the source tree or a link output directory.
+pub fn prepare_sync_target(
+    source: &Path,
+    formats_root: &Path,
+    max_qual_root: &Path,
+    target: PathBuf,
+) -> Result<PathBuf> {
     let target = resolve_existing(&target)?;
-    check_sync_layout(source, &target)?;
+    check_sync_layout(source, &[formats_root, max_qual_root], &target)?;
     Ok(target)
 }
 
-fn check_sync_layout(source: &Path, target: &Path) -> Result<()> {
+fn check_sync_layout(source: &Path, link_roots: &[&Path], target: &Path) -> Result<()> {
     if source == target {
         bail!(
             "the source directory ({}) is the same as the sync target; refusing to run",
@@ -372,6 +377,32 @@ fn check_sync_layout(source: &Path, target: &Path) -> Result<()> {
             "the source directory ({}) is inside the sync target; refusing to run",
             source.display()
         );
+    }
+    // A target that overlaps a link output directory would either copy the
+    // derived tree back on top of the links, or (mirror mode) delete the
+    // link layout as "stale".
+    for root in link_roots {
+        if target == *root {
+            bail!(
+                "the sync target ({}) is the same as a link output directory ({}); refusing to run",
+                target.display(),
+                root.display()
+            );
+        }
+        if is_under(target, root) {
+            bail!(
+                "the sync target ({}) is inside a link output directory ({}); refusing to run",
+                target.display(),
+                root.display()
+            );
+        }
+        if is_under(root, target) {
+            bail!(
+                "a link output directory ({}) is inside the sync target ({}); refusing to run",
+                root.display(),
+                target.display()
+            );
+        }
     }
     Ok(())
 }
