@@ -15,6 +15,7 @@
 //! and prunes empty directories. The source tree is never modified.
 
 mod clean;
+mod copy;
 mod link;
 mod names;
 mod scan;
@@ -26,6 +27,7 @@ pub use stats::Stats;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
@@ -165,17 +167,17 @@ pub fn run(cfg: &Config) -> Result<Stats> {
     stats.errors.extend(scan.errors);
 
     // 2. Compute the desired links.
-    let mut format_links: Vec<(PathBuf, PathBuf, link::InodeRef)> =
+    let mut format_links: Vec<(PathBuf, PathBuf, link::FileId)> =
         Vec::with_capacity(scan.files.len());
     for f in &scan.files {
         let dest = cfg.formats_root.join(&f.ext).join(&f.rel);
-        format_links.push((f.path.clone(), dest, f.ino));
+        format_links.push((f.path.clone(), dest, f.id));
     }
-    let mut track_links: Vec<(PathBuf, PathBuf, link::InodeRef)> =
+    let mut track_links: Vec<(PathBuf, PathBuf, link::FileId)> =
         Vec::with_capacity(scan.tracks.len());
     for t in scan.tracks.values() {
         let dest = cfg.max_qual_root.join(format!("{}.{}", t.key, t.best_ext));
-        track_links.push((t.best_path.clone(), dest, t.best_ino));
+        track_links.push((t.best_path.clone(), dest, t.best_id));
     }
 
     // 3. Create the output roots (never in a dry run). Parent
@@ -189,14 +191,14 @@ pub fn run(cfg: &Config) -> Result<Stats> {
     }
 
     // 4. Ensure every desired hard link (in parallel).
-    let all_links: Vec<(PathBuf, PathBuf, link::InodeRef)> = format_links
+    let all_links: Vec<(PathBuf, PathBuf, link::FileId)> = format_links
         .iter()
         .chain(track_links.iter())
         .cloned()
         .collect();
     let link_results: Vec<Result<link::LinkAction>> = all_links
         .par_iter()
-        .map(|(src, dest, ino)| link::ensure_hard_link(src, dest, *ino, cfg.dry_run, cfg.verbose))
+        .map(|(src, dest, id)| link::ensure_hard_link(src, dest, *id, cfg.dry_run, cfg.verbose))
         .collect();
     for result in link_results {
         match result {
@@ -227,4 +229,128 @@ pub fn run(cfg: &Config) -> Result<Stats> {
     stats.dirs_removed += track_dirs;
 
     Ok(stats)
+}
+
+/// What a `sync` run materializes on the destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncSelection {
+    /// All source files of one managed format, at their source relative paths.
+    Format(String),
+    /// The best-quality file of each track (per the format order).
+    Best,
+}
+
+/// Run one incremental sync of the selected view to `target`.
+///
+/// Copies only the files that are missing or stale (by size + mtime),
+/// preserves each source mtime on the destination, and — unless
+/// `no_delete` is set — removes everything the selected view does not want,
+/// so the destination becomes an exact mirror of it.
+pub fn run_sync(
+    cfg: &Config,
+    target: &Path,
+    selection: &SyncSelection,
+    no_delete: bool,
+) -> Result<Stats> {
+    let mut stats = Stats::default();
+
+    let format_index: HashMap<String, usize> = cfg
+        .format_order
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.clone(), i))
+        .collect();
+
+    // 1. Scan the source tree once, pruning the link output roots so we
+    //    never copy our own derived trees.
+    let excluded = vec![cfg.formats_root.clone(), cfg.max_qual_root.clone()];
+    let scan = scan::scan(&cfg.source, &excluded, &format_index)?;
+    stats.regular_files = scan.regular_files;
+    stats.managed_files = scan.files.len();
+    stats.tracks = scan.tracks.len();
+    stats.errors.extend(scan.errors);
+
+    // 2. Compute the desired copies: (source, destination, size, mtime).
+    let mut pairs: Vec<(PathBuf, PathBuf, u64, SystemTime)> = Vec::new();
+    match selection {
+        SyncSelection::Format(ext) => {
+            pairs.reserve(scan.files.len());
+            for f in &scan.files {
+                if f.ext == *ext {
+                    let dest = target.join(&f.rel);
+                    pairs.push((f.path.clone(), dest, f.id.size, f.id.mtime));
+                }
+            }
+        }
+        SyncSelection::Best => {
+            pairs.reserve(scan.tracks.len());
+            for t in scan.tracks.values() {
+                let dest = target.join(format!("{}.{}", t.key, t.best_ext));
+                pairs.push((t.best_path.clone(), dest, t.best_id.size, t.best_id.mtime));
+            }
+        }
+    }
+
+    // 3. Create the destination root (never in a dry run). Parent
+    //    directories of individual copies are created on demand.
+    if !cfg.dry_run {
+        fs::create_dir_all(target)
+            .with_context(|| format!("create directory {}", target.display()))?;
+    }
+
+    // 4. Copy every desired file that is missing or stale (in parallel).
+    let copy_results: Vec<Result<copy::CopyAction>> = pairs
+        .par_iter()
+        .map(|(src, dest, size, mtime)| {
+            copy::ensure_copied(src, dest, *size, *mtime, cfg.dry_run, cfg.verbose)
+        })
+        .collect();
+    for result in copy_results {
+        match result {
+            Ok(copy::CopyAction::UpToDate) => stats.files_up_to_date += 1,
+            Ok(copy::CopyAction::Copied) => stats.files_copied += 1,
+            Err(err) => stats.errors.push(format!("{err:#}")),
+        }
+    }
+
+    // 5. Unless --no-delete, remove everything the desired state does not
+    //    want, so the destination mirrors the selected view exactly.
+    if !no_delete {
+        let keep: HashSet<PathBuf> = pairs.iter().map(|(_, d, _, _)| d.clone()).collect();
+        let (removed, dirs) = clean::reconcile_tree(target, &keep, cfg.dry_run, cfg.verbose)?;
+        stats.files_removed += removed.len();
+        stats.dirs_removed += dirs;
+    }
+
+    Ok(stats)
+}
+
+/// Resolve the sync destination and refuse layouts that could write into
+/// the source tree.
+pub fn prepare_sync_target(source: &Path, target: PathBuf) -> Result<PathBuf> {
+    let target = resolve_existing(&target)?;
+    check_sync_layout(source, &target)?;
+    Ok(target)
+}
+
+fn check_sync_layout(source: &Path, target: &Path) -> Result<()> {
+    if source == target {
+        bail!(
+            "the source directory ({}) is the same as the sync target; refusing to run",
+            source.display()
+        );
+    }
+    if is_under(target, source) {
+        bail!(
+            "the sync target ({}) is inside the source directory; refusing to run",
+            target.display()
+        );
+    }
+    if is_under(source, target) {
+        bail!(
+            "the source directory ({}) is inside the sync target; refusing to run",
+            source.display()
+        );
+    }
+    Ok(())
 }

@@ -15,6 +15,10 @@ pub struct Stats {
     pub links_replaced: usize,
     /// Links already correct, left untouched.
     pub links_up_to_date: usize,
+    /// Files copied to the sync target.
+    pub files_copied: usize,
+    /// Sync-target files already matching the source, left untouched.
+    pub files_up_to_date: usize,
     /// Files removed because the desired state does not want them.
     pub files_removed: usize,
     /// Empty directories removed.
@@ -31,16 +35,22 @@ impl Stats {
 
     /// A short human-readable summary of the run.
     pub fn summary(&self) -> String {
-        let mut lines = vec![
-            format!(
-                "scanned {} regular files: {} managed, {} tracks",
-                self.regular_files, self.managed_files, self.tracks
-            ),
-            format!(
+        let mut lines = vec![format!(
+            "scanned {} regular files: {} managed, {} tracks",
+            self.regular_files, self.managed_files, self.tracks
+        )];
+        if self.links_created > 0 || self.links_replaced > 0 || self.links_up_to_date > 0 {
+            lines.push(format!(
                 "links: {} created, {} replaced, {} up to date",
                 self.links_created, self.links_replaced, self.links_up_to_date
-            ),
-        ];
+            ));
+        }
+        if self.files_copied > 0 || self.files_up_to_date > 0 {
+            lines.push(format!(
+                "copies: {} copied, {} up to date",
+                self.files_copied, self.files_up_to_date
+            ));
+        }
         if self.files_removed > 0 {
             lines.push(format!("files removed: {}", self.files_removed));
         }

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use rayon::prelude::*;
 
-use crate::link::InodeRef;
+use crate::link::FileId;
 use crate::names::{split_name, track_key};
 use crate::walk::{self, Kind};
 
@@ -25,9 +25,10 @@ pub struct SourceFile {
     pub ext: String,
     /// Track key (relative path minus the final extension).
     pub track: String,
-    /// Identity of the file, captured here so the link phase does not
-    /// have to stat the source again (a round trip on network mounts).
-    pub ino: InodeRef,
+    /// Identity of the file (dev, ino, size, mtime), captured here so the
+    /// link and copy phases do not have to stat the source again (a round
+    /// trip on network mounts).
+    pub id: FileId,
 }
 
 /// One track: all source files that share a track key, plus the
@@ -41,7 +42,7 @@ pub struct Track {
     /// Absolute path of the best-quality source file.
     pub best_path: PathBuf,
     /// Identity of the best-quality source file.
-    pub best_ino: InodeRef,
+    pub best_id: FileId,
     /// Position of `best_ext` in the format order (lower is better).
     best_index: usize,
 }
@@ -119,10 +120,10 @@ pub fn scan(
                 )
             })?;
 
-            // Capture the file's identity now: the link phase must not
-            // stat the source again (one round trip per file on a slow
-            // NFS mount).
-            let ino = InodeRef::stat(&entry.path)
+            // Capture the file's identity now: neither the link phase nor
+            // the copy phase may stat the source again (one round trip per
+            // file on a slow NFS mount).
+            let id = FileId::stat(&entry.path)
                 .with_context(|| format!("stat source file {}", entry.path.display()))?;
 
             Ok(EntryOutcome::File(SourceFile {
@@ -130,7 +131,7 @@ pub fn scan(
                 ext: ext.to_string(),
                 track: track_key(rel.parent().unwrap_or(Path::new("")), stem),
                 path: entry.path,
-                ino,
+                id,
             }))
         })
         .collect();
@@ -162,7 +163,7 @@ pub fn scan(
                 track.best_index = index;
                 track.best_ext = file.ext.clone();
                 track.best_path = file.path.clone();
-                track.best_ino = file.ino;
+                track.best_id = file.id;
             }
             None => {
                 tracks.insert(
@@ -171,7 +172,7 @@ pub fn scan(
                         key: file.track.clone(),
                         best_ext: file.ext.clone(),
                         best_path: file.path.clone(),
-                        best_ino: file.ino,
+                        best_id: file.id,
                         best_index: index,
                     },
                 );

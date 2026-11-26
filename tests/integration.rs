@@ -269,20 +269,97 @@ fn assert_dirs_match(out_root: &Path, expected_files: &BTreeMap<String, PathBuf>
     );
 }
 
-/// Run musman on the given roots with all managed formats.
+/// Expected destination file set (relative path -> source path) for a sync:
+/// `only` = `Some(ext)` yields that format's files at their source-relative
+/// paths; `None` yields one file per track named `<track>.<best ext>`.
+fn sync_expected(src: &Path, exclude: &[PathBuf], only: Option<&str>) -> BTreeMap<String, PathBuf> {
+    let (format_links, track_links) = expected_state(src, FORMATS, exclude);
+    let mut out = BTreeMap::new();
+    match only {
+        Some(ext) => {
+            let prefix = format!("{ext}/");
+            for (rel, path) in format_links {
+                if let Some(stripped) = rel.strip_prefix(&prefix) {
+                    out.insert(stripped.to_string(), path);
+                }
+            }
+        }
+        None => out.extend(track_links),
+    }
+    out
+}
+
+/// Assert `target` holds exactly the expected files, each an independent
+/// copy (same content, different inode) of its source, with matching dirs.
+fn assert_sync_matches(target: &Path, expected: &BTreeMap<String, PathBuf>) {
+    let actual = list_files(target);
+    let actual_rels: BTreeSet<String> = actual.keys().cloned().collect();
+    let expected_rels: BTreeSet<String> = expected.keys().cloned().collect();
+    assert_eq!(
+        actual_rels,
+        expected_rels,
+        "file set mismatch in {}",
+        target.display()
+    );
+    for (rel, src_path) in expected {
+        let actual_path = actual.get(rel).unwrap();
+        assert_eq!(
+            fs::read(actual_path).unwrap(),
+            fs::read(src_path).unwrap(),
+            "{rel} content differs from its source"
+        );
+        assert_ne!(
+            inode(actual_path),
+            inode(src_path),
+            "{rel} must be an independent copy, not a hard link"
+        );
+    }
+    assert_dirs_match(target, expected);
+}
+
+/// Run `musman link` on the given roots with all managed formats.
 fn run_musman(src: &Path, formats: &Path, max_qual: &Path, extra: &[&str]) -> (String, String) {
-    let mut args: Vec<String> = vec![
+    let mut args: Vec<String> = vec!["link".into()];
+    extend_common(&mut args, src, formats, max_qual, extra);
+    let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run_ok(&args)
+}
+
+/// Append the flags shared by `link` and `sync` (`-s/-i/-m/-f...`).
+fn extend_common(
+    args: &mut Vec<String>,
+    src: &Path,
+    formats: &Path,
+    max_qual: &Path,
+    extra: &[&str],
+) {
+    args.extend([
         "-s".into(),
         src.display().to_string(),
         "-i".into(),
         formats.display().to_string(),
         "-m".into(),
         max_qual.display().to_string(),
-    ];
+    ]);
     for format in FORMATS {
         args.push("-f".into());
         args.push((*format).into());
     }
+    args.extend(extra.iter().map(|s| s.to_string()));
+}
+
+/// Run `musman sync` on the given source into `target` with all managed
+/// formats and the given `--only`/`--best` selection.
+fn run_sync(
+    src: &Path,
+    target: &Path,
+    formats: &Path,
+    max_qual: &Path,
+    selection: &[&str],
+    extra: &[&str],
+) -> (String, String) {
+    let mut args: Vec<String> = vec!["sync".into(), "-t".into(), target.display().to_string()];
+    extend_common(&mut args, src, formats, max_qual, selection);
     args.extend(extra.iter().map(|s| s.to_string()));
     let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     run_ok(&args)
@@ -642,6 +719,7 @@ fn layout_refusals_are_rejected() {
     fs::create_dir_all(source.join("sub")).unwrap();
 
     let (code, _, err) = run(&[
+        "link",
         "-s",
         &source.display().to_string(),
         "-i",
@@ -653,6 +731,7 @@ fn layout_refusals_are_rejected() {
     assert!(err.contains("same as an output directory"), "{err}");
 
     let (code, _, _err) = run(&[
+        "link",
         "-s",
         &source.display().to_string(),
         "-m",
@@ -664,6 +743,7 @@ fn layout_refusals_are_rejected() {
 
     let sub = source.join("sub");
     let (code, _, err) = run(&[
+        "link",
         "-s",
         &sub.display().to_string(),
         "-i",
@@ -675,6 +755,7 @@ fn layout_refusals_are_rejected() {
     assert!(err.contains("inside an output directory"), "{err}");
 
     let (code, _, err) = run(&[
+        "link",
         "-s",
         &source.display().to_string(),
         "-i",
@@ -688,6 +769,7 @@ fn layout_refusals_are_rejected() {
     assert!(err.contains("nested"), "{err}");
 
     let (code, _, err) = run(&[
+        "link",
         "-s",
         &source.display().to_string(),
         "-i",
@@ -711,6 +793,7 @@ fn duplicate_format_flags_are_deduped() {
     let max_qual = tmp.path().join("max_qual");
 
     let args: Vec<String> = vec![
+        "link".into(),
         "-s".into(),
         src.display().to_string(),
         "-i".into(),
@@ -835,11 +918,17 @@ fn usage_errors_exit_with_code_2() {
     let src = tmp.path().join("src");
     fs::create_dir_all(&src).unwrap();
 
-    let (code, _, _) = run(&["-s", &src.display().to_string()]);
+    let (code, _, _) = run(&["link", "-s", &src.display().to_string()]);
     assert_eq!(code, 2, "missing -f must be a usage error");
 
-    let (code, _, _) = run(&["--definitely-not-a-flag"]);
+    let (code, _, _) = run(&["link", "--definitely-not-a-flag"]);
     assert_eq!(code, 2, "unknown flags must be a usage error");
+
+    let (code, _, _) = run(&[]);
+    assert_eq!(code, 2, "a subcommand is required");
+
+    let (code, _, _) = run(&["definitely-not-a-subcommand"]);
+    assert_eq!(code, 2, "unknown subcommands must be a usage error");
 }
 
 // ---------------------------------------------------------------------
@@ -1063,4 +1152,344 @@ fn performance_on_realistic_library() {
     assert_eq!(expected_tracks.len(), songs);
     assert_tree_matches(&formats, &expected_formats);
     assert_tree_matches(&max_qual, &expected_tracks);
+}
+
+// ---------------------------------------------------------------------
+// sync subcommand
+// ---------------------------------------------------------------------
+
+/// Set up a sync sandbox: a source tree plus separate link roots and target.
+struct SyncSandbox {
+    /// Held only so the temporary directory outlives the test.
+    #[allow(dead_code)]
+    tmp: tempfile::TempDir,
+    src: PathBuf,
+    formats: PathBuf,
+    max_qual: PathBuf,
+    target: PathBuf,
+}
+
+fn make_sync_sandbox() -> SyncSandbox {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    make_source_tree(&src);
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+    let target = tmp.path().join("target");
+    SyncSandbox {
+        tmp,
+        src,
+        formats,
+        max_qual,
+        target,
+    }
+}
+
+impl SyncSandbox {
+    fn sync(&self, selection: &[&str], extra: &[&str]) -> (String, String) {
+        run_sync(
+            &self.src,
+            &self.target,
+            &self.formats,
+            &self.max_qual,
+            selection,
+            extra,
+        )
+    }
+
+    fn exclude(&self) -> Vec<PathBuf> {
+        vec![self.formats.clone(), self.max_qual.clone()]
+    }
+}
+
+#[test]
+fn sync_only_copies_selected_format() {
+    let sb = make_sync_sandbox();
+    sb.sync(&["--only", "flac"], &[]);
+
+    let expected = sync_expected(&sb.src, &sb.exclude(), Some("flac"));
+    assert_eq!(expected.len(), 3, "three flac files expected: {expected:?}");
+    assert_sync_matches(&sb.target, &expected);
+}
+
+#[test]
+fn sync_best_copies_one_file_per_track() {
+    let sb = make_sync_sandbox();
+    sb.sync(&["--best"], &[]);
+
+    let expected = sync_expected(&sb.src, &sb.exclude(), None);
+    // 01 Intro (flac), 02 Outro (mp3, no flac), 1. Title (flac), secret (flac).
+    assert_eq!(expected.len(), 4, "four tracks expected: {expected:?}");
+    assert!(expected.contains_key("Artist/Album A/01 Intro.flac"));
+    assert!(expected.contains_key("Artist/Album A/02 Outro.mp3"));
+    assert_sync_matches(&sb.target, &expected);
+}
+
+#[test]
+fn sync_second_run_is_idempotent() {
+    let sb = make_sync_sandbox();
+    sb.sync(&["--only", "flac"], &[]);
+    let before = snapshot(&sb.target);
+
+    let (out, _) = sb.sync(&["--only", "flac"], &[]);
+    assert!(out.contains("0 copied"), "re-run must copy nothing: {out}");
+
+    assert_eq!(
+        before,
+        snapshot(&sb.target),
+        "an up-to-date target must not be rewritten"
+    );
+}
+
+#[test]
+fn sync_updates_only_changed_files() {
+    let sb = make_sync_sandbox();
+    sb.sync(&["--only", "flac"], &[]);
+    let before = snapshot(&sb.target);
+
+    // Change one source file's content (and thus its size).
+    let changed = "Artist/Album A/01 Intro.flac";
+    write_file(&sb.src.join(changed), "flac-a, re-encoded and longer");
+    let (out, _) = sb.sync(&["--only", "flac"], &[]);
+
+    let after = snapshot(&sb.target);
+    assert!(
+        out.contains("1 copied"),
+        "exactly one file re-copied: {out}"
+    );
+    assert_ne!(
+        before[changed].0, after[changed].0,
+        "the changed file must be re-copied"
+    );
+    assert_eq!(
+        after[changed].1,
+        b"flac-a, re-encoded and longer".to_vec(),
+        "content must be updated"
+    );
+    for rel in before.keys() {
+        if rel != changed {
+            assert_eq!(
+                before[rel].0, after[rel].0,
+                "{rel} was not changed and must keep its inode"
+            );
+        }
+    }
+}
+
+#[test]
+fn sync_removes_stale_files_and_prunes_directories() {
+    let sb = make_sync_sandbox();
+    sb.sync(&["--only", "flac"], &[]);
+    assert!(sb.target.join(".hidden/secret.flac").is_file());
+
+    fs::remove_file(sb.src.join(".hidden/secret.flac")).unwrap();
+    let (out, _) = sb.sync(&["--only", "flac"], &[]);
+    assert!(
+        out.contains("files removed"),
+        "the stale file must go: {out}"
+    );
+
+    assert!(!sb.target.join(".hidden/secret.flac").exists());
+    assert!(
+        !sb.target.join(".hidden").exists(),
+        "the now-empty directory must be pruned"
+    );
+    let expected = sync_expected(&sb.src, &sb.exclude(), Some("flac"));
+    assert_sync_matches(&sb.target, &expected);
+}
+
+#[test]
+fn sync_no_delete_keeps_stale_files() {
+    let sb = make_sync_sandbox();
+    sb.sync(&["--only", "flac"], &[]);
+    assert!(sb.target.join(".hidden/secret.flac").is_file());
+
+    fs::remove_file(sb.src.join(".hidden/secret.flac")).unwrap();
+    sb.sync(&["--only", "flac"], &["--no-delete"]);
+
+    assert!(
+        sb.target.join(".hidden/secret.flac").is_file(),
+        "--no-delete must keep files the view no longer contains"
+    );
+}
+
+#[test]
+fn sync_preserves_source_mtime() {
+    use std::fs::{File, FileTimes};
+    use std::time::SystemTime;
+
+    let sb = make_sync_sandbox();
+    let file = sb.src.join("Artist/Album A/01 Intro.flac");
+    let pinned = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    File::open(&file)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(pinned))
+        .unwrap();
+
+    sb.sync(&["--only", "flac"], &[]);
+
+    let dest_mtime = fs::metadata(sb.target.join("Artist/Album A/01 Intro.flac"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let diff = dest_mtime
+        .duration_since(pinned)
+        .or_else(|_| pinned.duration_since(dest_mtime))
+        .unwrap();
+    assert!(
+        diff <= Duration::from_secs(5),
+        "dest mtime must track the source mtime (off by {diff:?})"
+    );
+}
+
+#[test]
+fn sync_dry_run_writes_nothing() {
+    let sb = make_sync_sandbox();
+
+    let (out, _) = sb.sync(&["--only", "flac"], &["--dry-run", "-v"]);
+    assert!(
+        out.lines().any(|l| l.starts_with("would copy")),
+        "dry run must plan the copies: {out}"
+    );
+    assert!(!sb.target.exists(), "dry run must not create the target");
+}
+
+#[test]
+fn sync_target_layout_is_checked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    write_file(&src.join("Artist/Album/01 Song.flac"), "flac");
+    let formats = tmp.path().join("formats");
+    let max_qual = tmp.path().join("max_qual");
+
+    // Target == source.
+    let (code, _, err) = run(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &src.display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "flac",
+    ]);
+    assert_eq!(code, 2, "target == source must be refused");
+    assert!(err.contains("same as the sync target"), "{err}");
+
+    // Target inside source.
+    let (code, _, err) = run(&[
+        "sync",
+        "-s",
+        &src.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &src.join("device").display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "flac",
+    ]);
+    assert_eq!(code, 2, "target inside source must be refused");
+    assert!(err.contains("inside the source"), "{err}");
+
+    // Source inside target: the source lives under the target directory.
+    let outer = tmp.path().join("outer");
+    let inner = outer.join("src");
+    write_file(&inner.join("Artist/Album/01 Song.flac"), "flac");
+    let (code, _, err) = run(&[
+        "sync",
+        "-s",
+        &inner.display().to_string(),
+        "-i",
+        &formats.display().to_string(),
+        "-m",
+        &max_qual.display().to_string(),
+        "-t",
+        &outer.display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "flac",
+    ]);
+    assert_eq!(code, 2, "source inside target must be refused");
+    assert!(err.contains("inside the sync target"), "{err}");
+}
+
+#[test]
+fn sync_only_must_name_a_managed_format() {
+    let sb = make_sync_sandbox();
+    let (code, _, err) = run(&[
+        "sync",
+        "-s",
+        &sb.src.display().to_string(),
+        "-i",
+        &sb.formats.display().to_string(),
+        "-m",
+        &sb.max_qual.display().to_string(),
+        "-t",
+        &sb.target.display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "wav",
+    ]);
+    assert_eq!(code, 2, "--only of an unmanaged format must be refused");
+    assert!(err.contains("not one of the managed formats"), "{err}");
+}
+
+#[test]
+fn sync_selection_is_exactly_one() {
+    let sb = make_sync_sandbox();
+
+    // Neither --only nor --best.
+    let (code, _, err) = run(&[
+        "sync",
+        "-s",
+        &sb.src.display().to_string(),
+        "-i",
+        &sb.formats.display().to_string(),
+        "-m",
+        &sb.max_qual.display().to_string(),
+        "-t",
+        &sb.target.display().to_string(),
+        "-f",
+        "flac",
+    ]);
+    assert_eq!(code, 2, "a selection is required: {err}");
+
+    // Both --only and --best.
+    let (code, _, err) = run(&[
+        "sync",
+        "-s",
+        &sb.src.display().to_string(),
+        "-i",
+        &sb.formats.display().to_string(),
+        "-m",
+        &sb.max_qual.display().to_string(),
+        "-t",
+        &sb.target.display().to_string(),
+        "-f",
+        "flac",
+        "--only",
+        "flac",
+        "--best",
+    ]);
+    assert_eq!(code, 2, "--only and --best are mutually exclusive: {err}");
+}
+
+#[test]
+fn sync_source_tree_is_never_modified() {
+    let sb = make_sync_sandbox();
+    let before = snapshot(&sb.src);
+    sb.sync(&["--only", "flac"], &[]);
+    sb.sync(&["--best"], &[]);
+    assert_eq!(snapshot(&sb.src), before, "the source tree was modified");
 }

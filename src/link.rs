@@ -8,25 +8,40 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 
-/// The identity of one file: its `(dev, ino)` pair.
+/// The identity of one file: its `(dev, ino)` pair plus size and mtime.
+///
+/// All four fields are captured by a single `symlink_metadata` call during
+/// the scan, so neither the link phase nor the copy phase ever re-stats the
+/// source: on a network mount every avoided syscall is a round trip not
+/// taken. The link phase uses `(dev, ino)` to tell "same file" apart from a
+/// stale link; the copy phase uses `(size, mtime)` to decide whether a
+/// destination is already up to date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InodeRef {
+pub struct FileId {
     /// Device number.
     pub dev: u64,
     /// Inode number.
     pub ino: u64,
+    /// Size in bytes.
+    pub size: u64,
+    /// Last modification time.
+    pub mtime: SystemTime,
 }
 
-impl InodeRef {
+impl FileId {
     /// Stat `path` (without following symlinks) and capture its identity.
     pub fn stat(path: &Path) -> io::Result<Self> {
         let meta = fs::symlink_metadata(path)?;
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         Ok(Self {
             dev: meta.dev(),
             ino: meta.ino(),
+            size: meta.len(),
+            mtime,
         })
     }
 
@@ -55,7 +70,7 @@ pub enum LinkAction {
 /// (a stale link to a different inode, a regular file, or a symlink) it
 /// is removed and re-linked. This mirrors the legacy `ln -f`.
 ///
-/// `src_ino` is the identity of `src` captured at scan time. If `src`
+/// `src_id` is the identity of `src` captured at scan time. If `src`
 /// was replaced between the scan and this call, the destination may be
 /// left one run behind; the next reconciliation fixes it.
 ///
@@ -64,7 +79,7 @@ pub enum LinkAction {
 pub fn ensure_hard_link(
     src: &Path,
     dest: &Path,
-    src_ino: InodeRef,
+    src_id: FileId,
     dry_run: bool,
     verbose: bool,
 ) -> Result<LinkAction> {
@@ -77,7 +92,7 @@ pub fn ensure_hard_link(
     };
 
     match dest_meta {
-        Some(meta) if meta.is_file() && src_ino.matches(&meta) => {
+        Some(meta) if meta.is_file() && src_id.matches(&meta) => {
             if verbose {
                 println!("ok      {}", dest.display());
             }
@@ -150,8 +165,8 @@ fn link_context(src: &Path, dest: &Path) -> String {
 mod tests {
     use super::*;
 
-    fn ref_of(path: &Path) -> InodeRef {
-        InodeRef::stat(path).unwrap()
+    fn ref_of(path: &Path) -> FileId {
+        FileId::stat(path).unwrap()
     }
 
     #[test]
