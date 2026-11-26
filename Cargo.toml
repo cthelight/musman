@@ -2,7 +2,7 @@
 name = "musman"
 version = "0.1.0"
 edition = "2024"
-description = "Fast hard-link manager for multi-format music libraries"
+description = "Fast hard-link manager and incremental copier for multi-format music libraries"
 readme = "README.md"
 
 [dependencies]

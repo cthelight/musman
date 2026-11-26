@@ -98,8 +98,8 @@ struct SyncArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Link(link) => run_link(&link.common),
-        Command::Sync(sync) => run_sync(
+        Command::Link(link) => handle_link(&link.common),
+        Command::Sync(sync) => handle_sync(
             &sync.common,
             &sync.target,
             sync.only.as_deref(),
@@ -142,7 +142,7 @@ fn sync_default_root(source: &Path, name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
-fn run_link(common: &CommonArgs) -> ExitCode {
+fn handle_link(common: &CommonArgs) -> ExitCode {
     // `link` creates the trees it is given, so the defaults are relative
     // to the current directory (the classic "run from inside the library").
     let formats_root = common
@@ -159,7 +159,7 @@ fn run_link(common: &CommonArgs) -> ExitCode {
     execute(musman::run(&config))
 }
 
-fn run_sync(
+fn handle_sync(
     common: &CommonArgs,
     target: &Path,
     only: Option<&str>,

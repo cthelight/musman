@@ -1,6 +1,7 @@
-//! musman: fast hard-link manager for multi-format music libraries.
+//! musman: fast hard-link manager and incremental copier for
+//! multi-format music libraries.
 //!
-//! musman keeps two derived trees in sync with a source music library by
+//! `link` keeps two derived trees in sync with the source library by
 //! maintaining hard links:
 //!
 //! - `formats_root/<ext>/<relative path>`: one link per source file,
@@ -9,10 +10,15 @@
 //!   (relative path minus its final extension), pointing at the best
 //!   available format according to the configured quality order.
 //!
-//! The tool is a *reconciler*: it computes the desired end state from a
-//! single pass over the source tree, then creates missing links,
-//! re-points stale ones, removes links the desired state does not want,
-//! and prunes empty directories. The source tree is never modified.
+//! `sync` incrementally copies a selection of the source (one format, or
+//! the best file of each track) into a target directory, preserving
+//! mtimes and — by default — mirroring the selection exactly.
+//!
+//! Both subcommands are *reconcilers*: they compute the desired end
+//! state from a single pass over the source tree, then create what is
+//! missing, replace what is stale, remove what the desired state does
+//! not want, and prune empty directories. The source tree is never
+//! modified.
 
 mod clean;
 mod copy;

@@ -153,7 +153,8 @@ or a refused layout.
   ignored, and the *last* dot wins (`1. Title.flac` is a `flac`).
 - Refused layouts (exit 2): `link` refuses the source equal to or
   inside an output root, or identical/nested output roots; `sync`
-  refuses a target that equals, contains, or is contained by the source.
+  refuses a target that equals, contains, or is contained by the
+  source or by either link output directory (`-i`/`-m`).
 - Directories named `.stfolder` (syncthing markers) are ignored
   entirely, whether or not they exist: never created, never removed,
   never touched (not walked, mtime preserved).
@@ -162,9 +163,9 @@ or a refused layout.
 
 `--dry-run` plans the whole operation and prints `would create` /
 `would replace` / `would remove` / `would prune` (for `link`) or
-`would copy` / `up to date` / `would remove` / `would prune` (for
-`sync`) lines plus the final summary, without creating or deleting
-anything (not even the output/target roots).
+`would copy` / `ok` (up-to-date files) / `would remove` / `would prune`
+(for `sync`) lines plus the final summary, without creating or
+deleting anything (not even the output/target roots).
 
 ## Performance notes (NFS)
 
